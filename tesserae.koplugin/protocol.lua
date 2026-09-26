@@ -234,9 +234,10 @@ end
 --- Seconds until the next wake, from a status answer and the local clock.
 -- wake_at is an absolute server epoch that lands before next_poll_s when a
 -- lineup step or quiet window is coming; it wins when present and sane.
+-- The local clock is not consulted: the answer is computed in the server's
+-- clock so a wrong reader clock cannot skew it. `now` stays for callers.
 function Protocol.seconds_until_next(status_answer, now, floor_s)
     floor_s = floor_s or 60
-    now = now or os.time()
     local next_s = tonumber(status_answer and status_answer.next_poll_s) or 900
     local wake_at = tonumber(status_answer and status_answer.wake_at)
     local server_time = tonumber(status_answer and status_answer.server_time)
