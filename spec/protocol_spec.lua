@@ -56,6 +56,17 @@ t.describe("register", function()
         t.eq(p.token, "tsk_abc")
     end)
 
+    t.it("accepts the 201 a self-hosted server answers a fresh pairing with", function()
+        local http = transport({
+            { status = 201, body = json.encode({ status = 201, device_token = "tsk_self", device_id = "kobo_spabw_d2d8f7", config = { sleep_interval_s = 900 }, reused_existing = false }) },
+        })
+        local p = Protocol.new({ base_url = "http://192.168.0.10:5000", http = http, json = json })
+        local r, err = p:register("12345678", { device_id = "kobo_spabw_d2d8f7", panel_w = 1072, panel_h = 1448, gamut = "gray_16", model = "Kobo_spaBW" })
+        t.eq(err, nil)
+        t.eq(r.device_token, "tsk_self")
+        t.eq(p.token, "tsk_self")
+    end)
+
     t.it("explains a bad code, a taken id, and a full plan", function()
         local http = transport({
             { status = 403, body = json.encode({ status = 403, error = "invalid or expired pairing code" }) },

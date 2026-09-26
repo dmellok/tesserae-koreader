@@ -137,7 +137,9 @@ function Protocol:register(code, identity)
     }
     local status, body = self:post_json(self:url("/register"), payload, { ["X-Pairing-Code"] = code })
     local decoded = decode_json(self.json, body)
-    if status ~= 200 or not decoded or type(decoded.device_token) ~= "string" then
+    -- A self-hosted server answers a fresh pairing with 201 and a re-pair
+    -- with 200; Tesserae Cloud always answers 200. Any 2xx with a token is a pair.
+    if status < 200 or status > 299 or not decoded or type(decoded.device_token) ~= "string" then
         local msg = message_for(status, decoded, body)
         if status == 403 then msg = "that claim code is not valid or has expired" end
         if status == 409 then msg = decoded and decoded.error or "a panel with this id is already paired; remove it in Tesserae first" end
