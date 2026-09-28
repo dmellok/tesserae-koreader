@@ -47,9 +47,16 @@ local Wake = dofile(plugin_dir .. "wake.lua")
 
 local DEFAULT_SERVER = "https://cloud.tesserae.ink"
 local HTTP_TIMEOUT_S = 25
+-- A frame request can sit behind the server's render gate (45 s on Tesserae
+-- Cloud) and then the render itself; 25 s cut those off as "timeout".
+local FRAME_TIMEOUT_S = 75
 local IMAGE_TIMEOUT_S = 90
 local MIN_INTERVAL_S = 60
 local RETRY_S = 300
+-- How long to wait for KOReader to report Wi-Fi up before giving the cycle
+-- up. KOReader's own connectivity check stops after 45 s without calling us
+-- back, and a busy network manager never calls back at all.
+local WIFI_WAIT_S = 90
 
 -- Candidate CA bundles: KOReader ships one under its data directory on every
 -- platform; the others are common system paths for the emulator.
@@ -59,6 +66,10 @@ local CA_BUNDLE_CANDIDATES = {
     function() return "/etc/ssl/certs/ca-certificates.crt" end,
     function() return "/etc/ssl/cert.pem" end,
 }
+
+local function trim_url(url)
+    return (tostring(url or ""):gsub("/+$", ""))
+end
 
 local Tesserae = WidgetContainer:extend{
     name = "tesserae",
@@ -165,7 +176,7 @@ function Tesserae:httpRequest(req)
         sink = ltn12.sink.table(sink_table)
     end
     local is_https = req.url:match("^https://") ~= nil
-    local timeout = req.sink_path and IMAGE_TIMEOUT_S or HTTP_TIMEOUT_S
+    local timeout = (req.sink_path and IMAGE_TIMEOUT_S) or (req.slow and FRAME_TIMEOUT_S) or HTTP_TIMEOUT_S
     http.TIMEOUT = timeout
     https.TIMEOUT = timeout
     local request = {
@@ -195,7 +206,12 @@ function Tesserae:httpRequest(req)
     end
     if not ok then
         if req.sink_path then os.remove(req.sink_path) end
-        return 0, tostring(status or "network request failed"), {}
+        local reason = tostring(status or "network request failed")
+        -- LuaSocket's whole explanation is the word "timeout"; say what timed out.
+        if reason == "timeout" or reason == "wantread" then
+            reason = T(_("no answer from the server within %1 s"), timeout)
+        end
+        return 0, reason, {}
     end
     local lowered = {}
     for k, v in pairs(headers or {}) do lowered[string.lower(k)] = v end
@@ -277,8 +293,12 @@ function Tesserae:pair(server, code)
         UIManager:show(InfoMessage:new{ text = T(_("This screen is %1 pixels wide, which Tesserae cannot pack. Rotate the screen and try again."), identity.panel_w) })
         return
     end
+    -- The token is kept until the new one arrives: Tesserae Cloud lets a
+    -- reader re-key its own id only when the request carries the current
+    -- token, and a failed attempt should leave the pairing that works.
+    local same_server = trim_url(server) == trim_url(self.settings.server_url)
     self.settings.server_url = server
-    self.settings.device_token = nil
+    if not same_server then self.settings.device_token = nil end
     self:saveSettings()
     NetworkMgr:runWhenOnline(function()
         local busy = InfoMessage:new{ text = _("Pairing…") }
@@ -394,7 +414,17 @@ function Tesserae:refresh(interactive)
     self.wake:cancel()
     self.wake:kindle_hold(true)
     local started = os.time()
+    self.cycle_gen = (self.cycle_gen or 0) + 1
+    local gen = self.cycle_gen
+    local watchdog
     local function run()
+        UIManager:unschedule(watchdog)
+        if gen ~= self.cycle_gen then
+            -- Wi-Fi came up after the watchdog gave this cycle up. Nothing is
+            -- running now, so use the connection rather than waste it.
+            if not self.in_cycle then self:refresh(interactive) end
+            return
+        end
         local ok, err = pcall(function() self:cycle(interactive) end)
         if not ok then
             logger.err("Tesserae: cycle failed:", err)
@@ -402,6 +432,19 @@ function Tesserae:refresh(interactive)
             self:finishCycle(RETRY_S, interactive)
         end
     end
+    -- KOReader calls back once Wi-Fi is up. It does not call back when its
+    -- connectivity check gives up, nor when another connection attempt is
+    -- already in flight, and this cycle would then stay "in progress" for
+    -- good and every later refresh would return at the top. The watchdog
+    -- ends the cycle instead and retries later.
+    watchdog = function()
+        if gen ~= self.cycle_gen or not self.in_cycle then return end
+        logger.warn("Tesserae: Wi-Fi did not come up within", WIFI_WAIT_S, "s")
+        self.last_error = _("Wi-Fi did not connect")
+        if interactive then self:note(T(_("Tesserae: %1"), self.last_error), 6) end
+        self:finishCycle(RETRY_S, interactive)
+    end
+    UIManager:scheduleIn(WIFI_WAIT_S, watchdog)
     -- turnOnWifiAndWaitForConnection returns false when it could not even
     -- start; then the callback never comes and we must reschedule ourselves.
     local status = NetworkMgr:turnOnWifiAndWaitForConnection(function()
@@ -409,6 +452,7 @@ function Tesserae:refresh(interactive)
         run()
     end)
     if status == false then
+        UIManager:unschedule(watchdog)
         self.last_error = _("Wi-Fi could not be turned on")
         self:finishCycle(RETRY_S, interactive)
     end
@@ -461,7 +505,15 @@ function Tesserae:cycle(interactive)
         if not self.dashboard then self.settings.etag = nil end
     elseif frame.state == "empty" then
         self.last_error = frame.reason
-        if interactive then self:note(_("Nothing to show yet. Assign this panel a dashboard in Tesserae."), 6) end
+        if interactive then
+            -- The server says why when its renderer could not take the job;
+            -- that is not "assign a dashboard" advice.
+            if tostring(frame.reason or ""):find("^render unavailable") then
+                self:note(T(_("Tesserae: %1"), frame.reason), 6)
+            else
+                self:note(_("Nothing to show yet. Assign this panel a dashboard in Tesserae."), 6)
+            end
+        end
     end
 
     local report = client:status({ battery_pct = self:batteryPct(), fw_version = Protocol.VERSION })
@@ -483,6 +535,7 @@ end
 --- Schedule the next wake, drop Wi-Fi if asked, sleep if allowed.
 function Tesserae:finishCycle(next_s, interactive)
     self.in_cycle = false
+    self.cycle_gen = (self.cycle_gen or 0) + 1
     self.wake:kindle_hold(false)
     if not self.settings.enabled then return end
     local mode = self.wake:mode(self.settings.sleep_between)

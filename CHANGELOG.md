@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+- A refresh no longer wedges when KOReader never reports Wi-Fi up. KOReader's connectivity check stops after 45 s without calling back, and a connection attempt already in flight never calls back at all; the plugin then stayed "in progress" for good and every later refresh, scheduled or from the menu, returned without doing anything until KOReader was restarted. A 90 s watchdog now ends such a cycle and retries in five minutes; a late Wi-Fi callback starts a fresh cycle instead of being lost.
+- The frame request waits up to 75 s instead of 25 s. The server may render the dashboard during that request (a panel with no frame yet, or one whose dashboard just changed), and on Tesserae Cloud a render can queue behind other panels for up to 45 s before it starts.
+- A request that runs out of time says "no answer from the server within N s" instead of LuaSocket's bare "timeout".
+- Re-pairing from the Tesserae menu keeps the current token and sends it with the claim code. Tesserae Cloud only re-keys an id that is already paired for the holder of its token and otherwise answers 409, so a re-pair used to fail until the panel was removed in the console. Pairing against a different server still starts clean.
+- A failed frame download reports the server's reason (for example "frame not found") rather than just the status code.
+- When the server answers a poll with "render unavailable: ...", Refresh now shows that reason instead of advising to assign a dashboard.
+
 ## 0.1.0 (unreleased)
 
 First version.

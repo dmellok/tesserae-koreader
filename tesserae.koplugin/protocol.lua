@@ -21,7 +21,7 @@ local Protocol = {}
 Protocol.__index = Protocol
 
 Protocol.KIND = "koreader_client"
-Protocol.VERSION = "0.1.0"
+Protocol.VERSION = "0.2.0"
 Protocol.USER_AGENT = "tesserae-koreader/" .. Protocol.VERSION
 
 -- Gamuts the server can pack, finest first, with the width each one needs.
@@ -59,7 +59,9 @@ end
 --- Create a client.
 -- opts.base_url   server origin, e.g. https://cloud.tesserae.ink
 -- opts.http       function(req) -> status, body, headers
---                 req = {url, method, headers, body, sink_path}
+--                 req = {url, method, headers, body, sink_path, slow}
+--                 slow is set on a request the server may render during,
+--                 so the transport can allow it more time than a plain call.
 --                 status 0 means the request never reached a server.
 -- opts.json       table with encode(value) and decode(text)
 -- opts.device_id, opts.token  identity once paired (may be nil before)
@@ -122,6 +124,12 @@ end
 --- Pair this e-reader with a claim code.
 -- identity = {device_id, panel_w, panel_h, gamut, model, fw_version}
 -- Returns {device_token, device_id, config} or nil, err.
+--
+-- When the client already holds a token it goes along as the bearer: Tesserae
+-- Cloud re-keys an id that is already paired only for the holder of its current
+-- token and answers 409 otherwise, so a re-pair from the reader's own menu
+-- used to fail until the panel was removed in the console. A self-hosted
+-- server ignores the header on this route.
 function Protocol:register(code, identity)
     code = tostring(code or ""):gsub("%s", "")
     if code == "" then return fail(400, "a claim code is required") end
@@ -165,7 +173,9 @@ function Protocol:frame(etag)
     if not self.device_id_value or not self.token then return fail(401, "not paired") end
     local headers = self:auth_headers()
     if etag and etag ~= "" then headers["If-None-Match"] = etag end
-    local status, body, resp_headers = self.http({ url = self:url("/" .. self.device_id_value .. "/frame"), method = "GET", headers = headers })
+    -- The server may render the page while this request waits (a panel with no
+    -- frame yet, or one whose dashboard just changed), so it is marked slow.
+    local status, body, resp_headers = self.http({ url = self:url("/" .. self.device_id_value .. "/frame"), method = "GET", headers = headers, slow = true })
     resp_headers = resp_headers or {}
     if status == 304 then
         return { state = "unchanged", etag = resp_headers.etag or etag }
@@ -196,7 +206,7 @@ end
 --- Download the frame bytes to a file. Returns true or nil, err.
 function Protocol:download(url, sink_path)
     local status, body = self.http({ url = url, method = "GET", headers = self:auth_headers({ ["Accept"] = "*/*" }), sink_path = sink_path })
-    if status ~= 200 then return fail(status, "frame download failed: " .. message_for(status, nil, body), body) end
+    if status ~= 200 then return fail(status, "frame download failed: " .. message_for(status, decode_json(self.json, body), body), body) end
     return true
 end
 

@@ -67,6 +67,19 @@ t.describe("register", function()
         t.eq(p.token, "tsk_self")
     end)
 
+    t.it("carries the token it already holds, so a re-pair re-keys the same id", function()
+        local http, calls = transport({
+            { status = 200, body = json.encode({ status = 200, device_token = "tsk_new", device_id = "KindlePaperWhite2_a1b2c3", config = {} }) },
+        })
+        local p = Protocol.new({ base_url = "https://cloud.tesserae.ink", http = http, json = json, device_id = "KindlePaperWhite2_a1b2c3", token = "tsk_old" })
+        local r, err = p:register("12345678", { device_id = "KindlePaperWhite2_a1b2c3", panel_w = 758, panel_h = 1024, gamut = "gray_16" })
+        t.eq(err, nil)
+        t.eq(calls[1].headers["Authorization"], "Bearer tsk_old")
+        t.eq(calls[1].headers["X-Pairing-Code"], "12345678")
+        t.eq(r.device_token, "tsk_new")
+        t.eq(p.token, "tsk_new")
+    end)
+
     t.it("explains a bad code, a taken id, and a full plan", function()
         local http = transport({
             { status = 403, body = json.encode({ status = 403, error = "invalid or expired pairing code" }) },
@@ -107,6 +120,22 @@ t.describe("frame", function()
         t.eq(calls[1].headers["Authorization"], "Bearer tok")
         t.eq(calls[1].headers["If-None-Match"], nil)
         t.eq(calls[1].url, "http://h/api/v1/device/dev1/frame")
+        -- The server may render during this call; the transport gives it longer.
+        t.eq(calls[1].slow, true)
+    end)
+
+    t.it("download reports the server's own reason on failure", function()
+        local p, calls = paired({
+            { status = 404, body = json.encode({ status = 404, error = "frame not found" }) },
+            { status = 0, body = "no answer from the server within 90 s" },
+        })
+        local ok, err = p:download("http://h/blob/abc", "/tmp/x.bin")
+        t.eq(ok, nil)
+        t.eq(err.status, 404)
+        t.eq(err.message, "frame download failed: frame not found")
+        t.eq(calls[1].slow, nil)
+        local _, err2 = p:download("http://h/blob/abc", "/tmp/x.bin")
+        t.eq(err2.message, "frame download failed: no answer from the server within 90 s")
     end)
 
     t.it("maps 304 and 204", function()
