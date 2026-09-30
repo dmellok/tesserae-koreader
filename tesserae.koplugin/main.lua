@@ -333,6 +333,7 @@ function Tesserae:unpair()
     self.settings.device_token = nil
     self.settings.etag = nil
     self.settings.paired_at = nil
+    self:forgetCachedFrame()
     self:saveSettings()
     UIManager:show(InfoMessage:new{ text = _("Unpaired. Remove the panel in Tesserae too if you will not pair it again."), timeout = 6 })
 end
@@ -350,6 +351,10 @@ function Tesserae:start(interactive)
     self:saveSettings()
     self:holdSleepScreen()
     if self.wake:mode(self.settings.sleep_between) == "awake" then self.wake:hold_awake() end
+    -- Put the last frame back straight away, before Wi-Fi: after a KOReader
+    -- restart or a Hide/Show the server answers "unchanged" and would
+    -- otherwise leave the screen empty until the dashboard next changes.
+    if not self.dashboard then self:paintCachedFrame() end
     self:refresh(interactive)
 end
 
@@ -461,7 +466,8 @@ end
 --- With Wi-Fi up: frame, paint, status, schedule.
 function Tesserae:cycle(interactive)
     local client = self:client()
-    local frame, err = client:frame(self.settings.etag)
+    -- The etag says "I already show this". Only true while our widget is up.
+    local frame, err = client:frame(self.dashboard and self.settings.etag or nil)
     if not frame then
         self.last_error = err.message
         if err.unpaired then
@@ -480,8 +486,17 @@ function Tesserae:cycle(interactive)
     end
 
     if frame.state == "frame" then
-        local path = DataStorage:getDataDir() .. "/tesserae-frame." .. (frame.format == "png" and "png" or "bin")
-        local ok_dl, dl_err = client:download(frame.url, path)
+        local path = self:framePath(frame.format)
+        -- Download beside the cached frame and swap it in only when the
+        -- download succeeded, so a failure leaves the last good frame intact.
+        local part = path .. ".part"
+        local ok_dl, dl_err = client:download(frame.url, part)
+        if ok_dl then
+            os.remove(path)
+            if not os.rename(part, path) then ok_dl, dl_err = nil, { message = _("the frame file could not be saved") } end
+        else
+            os.remove(part)
+        end
         if not ok_dl then
             self.last_error = dl_err.message
             if interactive then self:note(T(_("Tesserae: %1"), dl_err.message), 6) end
@@ -491,6 +506,11 @@ function Tesserae:cycle(interactive)
         local painted, paint_err = self:paintFile(path, frame)
         if painted then
             self.settings.etag = frame.etag
+            self.settings.last_frame = {
+                format = frame.format == "png" and "png" or "bin",
+                native_w = frame.native_w,
+                native_h = frame.native_h,
+            }
             self.last_error = nil
         else
             self.last_error = paint_err
@@ -499,10 +519,10 @@ function Tesserae:cycle(interactive)
     elseif frame.state == "unchanged" then
         self.last_error = nil
         if interactive then self:note(_("Dashboard unchanged."), 2) end
-        -- The frame is still on the panel from last time. If KOReader has since
-        -- painted something else over it (a menu, its own UI) and we hold no
-        -- widget, ask for the pixels again next time.
-        if not self.dashboard then self.settings.etag = nil end
+        -- The etag is only sent while the dashboard is up, so the frame is
+        -- already on screen. Should the widget have gone meanwhile, repaint
+        -- from the cache, or ask for the pixels again next time.
+        if not self.dashboard and not self:paintCachedFrame() then self.settings.etag = nil end
     elseif frame.state == "empty" then
         self.last_error = frame.reason
         if interactive then
@@ -552,6 +572,28 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Painting
+
+function Tesserae:framePath(format)
+    return DataStorage:getDataDir() .. "/tesserae-frame." .. (format == "png" and "png" or "bin")
+end
+
+--- Show the last frame painted, from disk. Returns true when it is on screen.
+function Tesserae:paintCachedFrame()
+    local meta = self.settings.last_frame
+    if type(meta) ~= "table" then return false end
+    local path = self:framePath(meta.format)
+    if lfs.attributes(path, "mode") ~= "file" then return false end
+    local ok, painted = pcall(self.paintFile, self, path, meta)
+    if ok and painted then return true end
+    logger.warn("Tesserae: cached frame could not be shown:", painted)
+    return false
+end
+
+function Tesserae:forgetCachedFrame()
+    local meta = self.settings.last_frame
+    if type(meta) == "table" then os.remove(self:framePath(meta.format)) end
+    self.settings.last_frame = nil
+end
 
 --- Decode a downloaded frame and show it full screen.
 function Tesserae:paintFile(path, frame)

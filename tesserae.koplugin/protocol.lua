@@ -21,7 +21,7 @@ local Protocol = {}
 Protocol.__index = Protocol
 
 Protocol.KIND = "koreader_client"
-Protocol.VERSION = "0.2.0"
+Protocol.VERSION = "0.2.1"
 Protocol.USER_AGENT = "tesserae-koreader/" .. Protocol.VERSION
 
 -- Gamuts the server can pack, finest first, with the width each one needs.
