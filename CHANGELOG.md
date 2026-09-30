@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 (unreleased)
+## 0.2.1 (2026-09-30)
 
 - Showing the dashboard puts the last frame back on screen straight away, from the copy kept on the reader, before Wi-Fi is up. After a KOReader restart, or Hide and then Show, the screen used to stay empty with "Dashboard unchanged" until the dashboard next changed on the server, because the reader still told the server it had that frame. It now only says so while the frame is actually on screen, so a reader with no kept copy gets the frame again.
 - A frame is downloaded beside the kept copy and replaces it only once the download succeeds, so a failed download no longer wipes the last good frame.
