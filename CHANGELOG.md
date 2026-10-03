@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-10-04)
 
 - Colour readers get colour frames. On a reader KOReader reports as having a colour screen (Kobo Libra Colour, Kobo Clara Colour: E Ink Kaleido 3) the plugin pairs as a `kaleido3` panel; the server answers with a 24-bit PNG at the screen's resolution, quantised to the panel's 16 levels per channel, and the plugin draws it in colour. Before this a colour reader paired as a greyscale panel and photos came out grey. The refresh is flagged the way KOReader's image viewer flags its own, which is what makes its e-ink driver use the Kaleido colour waveform for the repaint.
 - Colour follows KOReader's Screen › Color rendering switch: with it off the reader pairs as greyscale and the Status screen says why.
