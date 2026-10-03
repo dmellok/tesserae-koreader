@@ -34,6 +34,27 @@ t.describe("gamut_for_width", function()
     end)
 end)
 
+t.describe("gamut_for", function()
+    t.it("announces kaleido3 for a colour reader whatever the width", function()
+        t.eq(Protocol.COLOUR_GAMUT, "kaleido3")
+        t.eq(Protocol.gamut_for(1264, true), "kaleido3")   -- Kobo Libra Colour
+        t.eq(Protocol.gamut_for(1072, true), "kaleido3")   -- Kobo Clara Colour
+        t.eq(Protocol.gamut_for(601, true), "kaleido3")    -- no packing rule for a PNG
+    end)
+
+    t.it("keeps the width packing rule for a grey reader", function()
+        t.eq(Protocol.gamut_for(758, false), "gray_16")
+        t.eq(Protocol.gamut_for(758, nil), "gray_16")
+        t.eq(Protocol.gamut_for(601, false), nil)
+    end)
+
+    t.it("describes the gamut for the status screen", function()
+        t.eq(Protocol.describe_gamut("kaleido3"), "kaleido3 (colour)")
+        t.eq(Protocol.describe_gamut("gray_16"), "gray_16")
+        t.eq(Protocol.describe_gamut(nil), nil)
+    end)
+end)
+
 t.describe("register", function()
     t.it("sends the claim code and the panel, and keeps the token", function()
         local http, calls = transport({
@@ -54,6 +75,22 @@ t.describe("register", function()
         t.eq(body.panel_w, 758)
         t.eq(body.gamut, "gray_16")
         t.eq(p.token, "tsk_abc")
+    end)
+
+    t.it("sends gamut kaleido3 for a colour reader", function()
+        local http, calls = transport({
+            { status = 200, body = json.encode({ status = 200, device_token = "tsk_col", device_id = "Kobo_monza_1a2b3c", config = {} }) },
+        })
+        local p = Protocol.new({ base_url = "https://cloud.tesserae.ink", http = http, json = json })
+        local identity = { device_id = "Kobo_monza_1a2b3c", panel_w = 1264, panel_h = 1680, gamut = Protocol.gamut_for(1264, true), model = "Kobo_monza" }
+        local r, err = p:register("12345678", identity)
+        t.eq(err, nil)
+        t.eq(r.device_token, "tsk_col")
+        local body = json.decode(calls[1].body)
+        t.eq(body.gamut, "kaleido3")
+        t.eq(body.panel_w, 1264)
+        t.eq(body.panel_h, 1680)
+        t.eq(body.kind, "koreader_client")
     end)
 
     t.it("accepts the 201 a self-hosted server answers a fresh pairing with", function()
@@ -122,6 +159,24 @@ t.describe("frame", function()
         t.eq(calls[1].url, "http://h/api/v1/device/dev1/frame")
         -- The server may render during this call; the transport gives it longer.
         t.eq(calls[1].slow, true)
+    end)
+
+    t.it("passes a png frame through with its format, for a colour or a grey identity", function()
+        local p = paired({
+            { status = 200, headers = { etag = '"c1"' }, body = json.encode({ url = "http://h/blob/c1.png", format = "png", panel_w = 1264, panel_h = 1680, native_w = 1264, native_h = 1680, render_id = "c1" }) },
+            { status = 200, body = json.encode({ url = "http://h/blob/g1", panel_w = 758, panel_h = 1024, render_id = "g1" }) },
+        })
+        -- The envelope does not depend on what the reader registered as: a
+        -- grey reader given a png frame decodes it the same way.
+        local f = p:frame(nil)
+        t.eq(f.state, "frame")
+        t.eq(f.format, "png")
+        t.eq(f.url, "http://h/blob/c1.png")
+        t.eq(f.native_w, 1264)
+        t.eq(f.etag, '"c1"')
+        local g = p:frame(nil)
+        t.eq(g.format, "bin")
+        t.eq(g.etag, '"g1"')
     end)
 
     t.it("download reports the server's own reason on failure", function()

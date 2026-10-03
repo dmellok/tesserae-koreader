@@ -7,6 +7,31 @@ local function collect(bytes, w, h, bpp)
     return px
 end
 
+t.describe("is_png", function()
+    -- The eight-byte PNG signature, then the start of an IHDR chunk.
+    local png = "\137PNG\r\n\26\n" .. "\0\0\0\13IHDR" .. string.rep("\0", 17)
+
+    t.it("recognises a PNG by its signature", function()
+        t.eq(Frame.is_png(png), true)
+        t.eq(#Frame.PNG_SIGNATURE, 8)
+    end)
+
+    t.it("does not mistake a packed frame for one", function()
+        t.eq(Frame.is_png(string.rep("\0", 758 * 1024 / 2)), false)
+        t.eq(Frame.is_png(string.char(0x81, 0x7e)), false)
+        -- A packed frame that happens to start with the first signature byte.
+        t.eq(Frame.is_png("\137PNG" .. string.rep("\255", 12)), false)
+        t.eq(Frame.is_png(""), false)
+        t.eq(Frame.is_png(nil), false)
+    end)
+
+    t.it("leaves the packed depth inference alone for a PNG-sized file", function()
+        -- A PNG's length is not a packed size, so the bit unpacker would
+        -- refuse it; the sniff is what routes it to the image decoder.
+        t.eq(Frame.bpp_for(#png, 8, 2), nil)
+    end)
+end)
+
 t.describe("bpp_for", function()
     t.it("infers the depth from the byte count", function()
         t.eq(Frame.bpp_for(758 * 1024 / 8, 758, 1024), 1)

@@ -16,6 +16,18 @@
 
 local Frame = {}
 
+-- The eight-byte PNG signature.
+local PNG_SIGNATURE = "\137PNG\r\n\26\n"
+Frame.PNG_SIGNATURE = PNG_SIGNATURE
+
+--- True when the bytes are a PNG file rather than a packed frame. The server
+-- says ``format = "png"`` for a colour reader; the signature check lets the
+-- decoder trust the bytes over the label, so a PNG is never fed to the bit
+-- unpacker and a packed frame never to the image decoder.
+function Frame.is_png(bytes)
+    return type(bytes) == "string" and bytes:sub(1, #PNG_SIGNATURE) == PNG_SIGNATURE
+end
+
 --- Bits per pixel implied by a byte count, or nil when nothing fits.
 function Frame.bpp_for(byte_count, w, h)
     local px = w * h

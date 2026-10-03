@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- Colour readers get colour frames. On a reader KOReader reports as having a colour screen (Kobo Libra Colour, Kobo Clara Colour: E Ink Kaleido 3) the plugin pairs as a `kaleido3` panel; the server answers with a 24-bit PNG at the screen's resolution, quantised to the panel's 16 levels per channel, and the plugin draws it in colour. Before this a colour reader paired as a greyscale panel and photos came out grey. The refresh is flagged the way KOReader's image viewer flags its own, which is what makes its e-ink driver use the Kaleido colour waveform for the repaint.
+- Colour follows KOReader's Screen › Color rendering switch: with it off the reader pairs as greyscale and the Status screen says why.
+- A colour reader paired by an earlier version is still registered as greyscale with the server; the Status screen says so and asks for one Pair again, after which colour frames arrive.
+- The Status screen's Screen line shows `kaleido3 (colour)` on a colour reader, and "Last frame: colour" once a colour frame is on screen.
+- A frame file that starts with the PNG signature is decoded as an image whatever the server labelled it, so a PNG is never fed to the bit unpacker; a PNG frame sent to a greyscale reader is shown in greyscale as before.
+- Greyscale readers are unchanged: the gamut is still picked by which packing divides the screen width, and the packed frame path is untouched.
+
 ## 0.2.1 (2026-09-30)
 
 - Showing the dashboard puts the last frame back on screen straight away, from the copy kept on the reader, before Wi-Fi is up. After a KOReader restart, or Hide and then Show, the screen used to stay empty with "Dashboard unchanged" until the dashboard next changed on the server, because the reader still told the server it had that frame. It now only says so while the frame is actually on screen, so a reader with no kept copy gets the frame again.

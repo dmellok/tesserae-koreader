@@ -21,7 +21,7 @@ local Protocol = {}
 Protocol.__index = Protocol
 
 Protocol.KIND = "koreader_client"
-Protocol.VERSION = "0.2.1"
+Protocol.VERSION = "0.3.0"
 Protocol.USER_AGENT = "tesserae-koreader/" .. Protocol.VERSION
 
 -- Gamuts the server can pack, finest first, with the width each one needs.
@@ -43,6 +43,26 @@ function Protocol.gamut_for_width(width)
         if width % g.px_per_byte == 0 then return g.id end
     end
     return nil
+end
+
+-- The gamut a colour reader announces (E Ink Kaleido 3: Kobo Libra Colour,
+-- Clara Colour). The server answers it with ``format = "png"``, a 24-bit RGB
+-- PNG at the panel's resolution already quantised to 16 levels per channel,
+-- so no packing rule applies and any width is fine.
+Protocol.COLOUR_GAMUT = "kaleido3"
+
+--- The gamut for a screen: ``kaleido3`` when the reader shows colour,
+-- otherwise the finest grey packing that fits the width.
+function Protocol.gamut_for(width, colour)
+    if colour then return Protocol.COLOUR_GAMUT end
+    return Protocol.gamut_for_width(width)
+end
+
+--- A gamut id as the status screen shows it.
+function Protocol.describe_gamut(gamut)
+    if gamut == nil then return nil end
+    if gamut == Protocol.COLOUR_GAMUT then return gamut .. " (colour)" end
+    return gamut
 end
 
 --- Derive a device id the server accepts: ``[a-zA-Z][a-zA-Z0-9_-]{1,63}``.

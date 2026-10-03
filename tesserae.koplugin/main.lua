@@ -231,13 +231,36 @@ end
 -- ---------------------------------------------------------------------------
 -- Pairing
 
+--- Whether this reader shows colour, as KOReader sees it.
+-- Returns "on" when frames can be drawn in colour, "off" when the screen is
+-- colour but KOReader's own colour rendering switch is off, and nil for a
+-- greyscale reader. Every call is wrapped so a KOReader build without one
+-- of these methods counts as grey rather than failing.
+--
+--   Device:hasColorScreen()   the device flag (Kobo Libra Colour, Clara Colour)
+--   Screen.isColorEnabled()   that flag gated by the user's "color_rendering" setting
+--   Screen.bb:isRGB()         the framebuffer takes colour pixels (BBRGB32 on Kobo)
+function Tesserae:colourState()
+    local ok, has = pcall(function() return Device:hasColorScreen() end)
+    if not (ok and has) then return nil end
+    local ok_bb, rgb = pcall(function() return Screen.bb:isRGB() end)
+    if ok_bb and rgb == false then return nil end
+    local ok_en, enabled = pcall(function() return Screen.isColorEnabled() end)
+    if ok_en and enabled == false then return "off" end
+    return "on"
+end
+
+function Tesserae:hasColour()
+    return self:colourState() == "on"
+end
+
 function Tesserae:identity()
     local w, h = Screen:getWidth(), Screen:getHeight()
     return {
         device_id = self.settings.device_id or Protocol.device_id(Device.model, self.settings.install_suffix),
         panel_w = w,
         panel_h = h,
-        gamut = Protocol.gamut_for_width(w),
+        gamut = Protocol.gamut_for(w, self:hasColour()),
         model = tostring(Device.model or "koreader"),
         fw_version = Protocol.VERSION,
     }
@@ -315,6 +338,7 @@ function Tesserae:pair(server, code)
         self.settings.device_id = result.device_id
         self.settings.device_token = result.device_token
         self.settings.paired_at = os.time()
+        self.settings.gamut = identity.gamut
         if type(result.config.sleep_interval_s) == "number" then
             self.settings.interval_s = math.max(MIN_INTERVAL_S, result.config.sleep_interval_s)
         end
@@ -333,6 +357,7 @@ function Tesserae:unpair()
     self.settings.device_token = nil
     self.settings.etag = nil
     self.settings.paired_at = nil
+    self.settings.gamut = nil
     self:forgetCachedFrame()
     self:saveSettings()
     UIManager:show(InfoMessage:new{ text = _("Unpaired. Remove the panel in Tesserae too if you will not pair it again."), timeout = 6 })
@@ -596,28 +621,37 @@ function Tesserae:forgetCachedFrame()
 end
 
 --- Decode a downloaded frame and show it full screen.
+-- A PNG (the server's answer to a colour reader, and to any reader it
+-- chooses to send one to) is decoded by KOReader's image stack, which keeps
+-- the colour: MuPDF hands back an RGB blit buffer, and blitting it onto a
+-- colour framebuffer keeps the pixels while a greyscale framebuffer takes
+-- their luminance. Anything else is a packed frame.
 function Tesserae:paintFile(path, frame)
     local sw, sh = Screen:getWidth(), Screen:getHeight()
+    local f = io.open(path, "rb")
+    if not f then return false, _("the frame file could not be read") end
+    local bytes = f:read("*a")
+    f:close()
     local bb
-    if frame.format == "png" then
-        bb = RenderImage:renderImageFile(path, false, sw, sh)
+    local colour = false
+    if frame.format == "png" or Frame.is_png(bytes) then
+        bb = RenderImage:renderImageData(bytes, #bytes, false, sw, sh)
         if not bb then return false, _("the PNG could not be decoded") end
+        local ok, rgb = pcall(function() return bb:isRGB() end)
+        colour = ok and rgb == true and self:hasColour()
     else
-        local f = io.open(path, "rb")
-        if not f then return false, _("the frame file could not be read") end
-        local bytes = f:read("*a")
-        f:close()
         local nw, nh = frame.native_w or sw, frame.native_h or sh
         local rotate = Frame.rotation_for(nw, nh, sw, sh)
         local err
         bb, err = Frame.to_blitbuffer(bytes, nw, nh, rotate)
         if not bb then return false, err end
     end
-    self:showDashboard(bb, sw, sh)
+    self.last_frame_colour = colour
+    self:showDashboard(bb, sw, sh, colour)
     return true
 end
 
-function Tesserae:showDashboard(bb, sw, sh)
+function Tesserae:showDashboard(bb, sw, sh, colour)
     local image = ImageWidget:new{
         image = bb,
         image_disposable = true,
@@ -637,9 +671,14 @@ function Tesserae:showDashboard(bb, sw, sh)
     self.dashboard.onTap = function() plugin:onDashboardTap() return true end
     -- Physical keys on Kindles with keypads: any press opens the same menu.
     self.dashboard.onKeyPress = function() plugin:onDashboardTap() return true end
+    -- KOReader's e-ink driver promotes a full refresh to the Kaleido colour
+    -- waveform (GC16 to GCC16, with colour post-processing) only when the
+    -- refresh is flagged as dithered image content, the way its own image
+    -- viewer flags itself. A grey frame keeps the plain full refresh.
+    self.dashboard.dithered = colour or nil
     UIManager:show(self.dashboard)
     -- A full refresh clears ghosting from whatever the reader showed before.
-    UIManager:setDirty(self.dashboard, "full")
+    UIManager:setDirty(self.dashboard, "full", nil, colour or nil)
     if previous then UIManager:close(previous) end
 end
 
@@ -688,7 +727,18 @@ function Tesserae:showStatus()
     else
         table.insert(lines, _("Not paired"))
     end
-    table.insert(lines, T(_("Screen: %1×%2, %3"), Screen:getWidth(), Screen:getHeight(), Protocol.gamut_for_width(Screen:getWidth()) or "?"))
+    local w, h = Screen:getWidth(), Screen:getHeight()
+    local colour = self:colourState()
+    local gamut = Protocol.gamut_for(w, colour == "on")
+    local screen = Protocol.describe_gamut(gamut) or "?"
+    if colour == "off" then screen = screen .. " " .. _("(colour rendering is off in KOReader)") end
+    table.insert(lines, T(_("Screen: %1×%2, %3"), w, h, screen))
+    -- A pairing from before 0.3.0 stored no gamut; it announced the grey one.
+    local paired_gamut = self.settings.gamut or Protocol.gamut_for_width(w)
+    if self:isPaired() and paired_gamut and gamut and paired_gamut ~= gamut then
+        table.insert(lines, T(_("Paired as %1; choose Pair again so the server sends %2 frames"), paired_gamut, Protocol.describe_gamut(gamut)))
+    end
+    if self.last_frame_colour then table.insert(lines, _("Last frame: colour")) end
     table.insert(lines, T(_("Interval: %1 min"), math.floor((self.settings.interval_s or 900) / 60)))
     table.insert(lines, self:describeMode())
     if self.last_ok_at then table.insert(lines, T(_("Last check-in: %1"), os.date("%Y-%m-%d %H:%M", self.last_ok_at))) end
