@@ -240,7 +240,31 @@ t.describe("status and next wake", function()
         local s = p:status({ battery_pct = 72 })
         t.eq(s.next_poll_s, 600)
         t.eq(json.decode(calls[1].body).battery_pct, 72)
+        t.eq(json.decode(calls[1].body).overlay, nil)
         t.eq(calls[1].url, "http://h/api/v1/device/d/status")
+    end)
+
+    t.it("advertises frame patches only when asked", function()
+        local http, calls = transport({ { status = 200, body = json.encode({ status = 200, config = {} }) } })
+        local p = Protocol.new({ base_url = "http://h", http = http, json = json, device_id = "d", token = "t" })
+        p:status({ battery_pct = 50, patches = true })
+        t.eq(json.decode(calls[1].body).overlay.schema, 2)
+    end)
+
+    t.it("hands over a pending patch with its blob url made absolute", function()
+        local doc = { schema = 2, frame_digest = "abc", seq = 7, format = "fb-rect", url = "/api/v1/device/d/frame/patch/f00",
+            rects = { { x = 0, y = 0, w = 8, h = 1, offset = 0, len = 4 } } }
+        local http = transport({
+            { status = 200, body = json.encode({ status = 200, config = {}, overlay_patches = doc }) },
+            { status = 200, body = json.encode({ status = 200, config = {}, overlay_patches = { url = "/x" } }) },
+        })
+        local p = Protocol.new({ base_url = "http://h/", http = http, json = json, device_id = "d", token = "t" })
+        local s = p:status({ patches = true })
+        t.eq(s.patches.url, "http://h/api/v1/device/d/frame/patch/f00")
+        t.eq(s.patches.seq, 7)
+        t.eq(s.patches.rects[1].len, 4)
+        -- A document without rectangles is not a patch.
+        t.eq(p:status({ patches = true }).patches, nil)
     end)
 
     t.it("strips an etag down to the digest", function()

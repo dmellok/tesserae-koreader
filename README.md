@@ -58,10 +58,13 @@ A colour reader paired with an earlier version of this plugin is registered with
 
 Each wake:
 
-1. `GET /api/v1/device/<id>/frame` with `If-None-Match` set to the last frame's id. A 304 means nothing changed and the cycle ends there.
-2. Download the frame. A packed frame is decoded into an 8-bit blit buffer; a PNG (what a colour reader gets) is decoded by KOReader's image stack into a colour buffer. Either is painted with a full refresh, the colour one flagged so the Kaleido colour waveform is used.
-3. `POST /api/v1/device/<id>/status` with the battery level. The answer carries the interval and, when a lineup or quiet window is near, the exact time to wake.
-4. Arm the next wake, drop Wi-Fi, suspend.
+1. `POST /api/v1/device/<id>/status` with the battery level. The answer carries the interval and, when a lineup or quiet window is near, the exact time to wake. A greyscale reader also advertises frame patches here, and the answer carries the pending patch for the frame on screen, if there is one.
+2. Apply that patch: download its changed rectangles, copy them into a copy of the frame kept on the reader (the kept frame itself stays as downloaded, since every patch is relative to it) and refresh just those rectangles without a flash. After eight patches in a row the next one repaints the whole screen to clear ghosting.
+3. `GET /api/v1/device/<id>/frame` with `If-None-Match` set to the last frame's id. A 304 means the frame on screen is current. The heartbeat goes first because a patch still unfetched at this request counts as undelivered, and the server answers with the whole new frame instead.
+4. Otherwise download the frame. A packed frame is decoded into an 8-bit blit buffer; a PNG (what a colour reader gets) is decoded by KOReader's image stack into a colour buffer. Either is painted with a full refresh, the colour one flagged so the Kaleido colour waveform is used.
+5. Arm the next wake, drop Wi-Fi, suspend.
+
+A patch is how Tesserae sends a small change to the page on screen (a clock, a few values): the frame id stays the same and only the changed rectangles travel, in the frame's own packing. Larger changes still arrive as a new frame. The device's "Update delivery" setting in Tesserae turns patches off.
 
 The wire format for greyscale is the one Tesserae's ESP32 firmware paints: row major, no header, 1 bit per pixel for mono, 2 for four greys, 4 for sixteen. The plugin infers the depth from the byte count. A frame that starts with the PNG signature is handed to the image decoder whatever the server labelled it.
 
@@ -69,7 +72,7 @@ The wire format for greyscale is the one Tesserae's ESP32 firmware paints: row m
 
 ```sh
 brew install luajit        # or apt-get install luajit
-luajit spec/run.lua        # 35 tests, no KOReader needed
+luajit spec/run.lua        # 39 tests, no KOReader needed
 ```
 
 `protocol.lua`, `frame.lua` and `wake.lua` are dependency free and tested under plain LuaJIT with KOReader's blit buffer stubbed. `main.lua` is the KOReader glue. The KOReader emulator on a desktop is the quickest way to try the whole plugin; the sibling-module loader uses `dofile` on the plugin's own folder, so the folder can be symlinked into the emulator's `plugins/`.
