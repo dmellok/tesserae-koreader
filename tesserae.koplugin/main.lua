@@ -439,8 +439,9 @@ function Tesserae:note(msg, timeout)
 end
 
 --- One refresh: bring Wi-Fi up, run the cycle, then schedule the next.
--- ``stroke`` is a touch on the dashboard to report with the frame request.
-function Tesserae:refresh(interactive, stroke)
+-- ``stroke`` is a touch on the dashboard to report with the frame request,
+-- ``press`` a page-turn key; a refresh carries at most one of them.
+function Tesserae:refresh(interactive, stroke, press)
     if self.in_cycle then
         logger.info("Tesserae: refresh already in progress")
         return
@@ -461,7 +462,7 @@ function Tesserae:refresh(interactive, stroke)
             if not self.in_cycle then self:refresh(interactive) end
             return
         end
-        local ok, err = pcall(function() self:cycle(interactive, stroke) end)
+        local ok, err = pcall(function() self:cycle(interactive, stroke, press) end)
         if not ok then
             logger.err("Tesserae: cycle failed:", err)
             self.last_error = tostring(err)
@@ -495,7 +496,7 @@ function Tesserae:refresh(interactive, stroke)
 end
 
 --- With Wi-Fi up: status and patch, frame, paint, schedule.
-function Tesserae:cycle(interactive, stroke)
+function Tesserae:cycle(interactive, stroke, press)
     -- Milliseconds into the cycle at which each step finished, logged as one
     -- line, so a slow touch splits into server time (the frame request, which
     -- carries the touch's dispatch and render) and reader time. "paint" ends
@@ -520,14 +521,14 @@ function Tesserae:cycle(interactive, stroke)
     })
     step("status")
     local status_at = os.time()
-    -- A touch's frame request repaints the whole page anyway: the server runs
-    -- the action, renders, and answers with the full frame in the same
-    -- request, so a pending patch painted first would only delay the touch.
-    local patched = not stroke and report and report.patches and self:applyPatch(client, report.patches)
+    -- A touch's or a key's frame request repaints the whole page anyway: the
+    -- server runs the action, renders, and answers with the full frame in the
+    -- same request, so a pending patch painted first would only delay it.
+    local patched = not (stroke or press) and report and report.patches and self:applyPatch(client, report.patches)
     if patched then step("patch") end
 
     -- The etag says "I already show this". Only true while our widget is up.
-    local frame, err = client:frame(self.dashboard and self.settings.etag or nil, stroke)
+    local frame, err = client:frame(self.dashboard and self.settings.etag or nil, stroke, press)
     step("frame")
     if not frame then
         self.last_error = err.message
@@ -602,7 +603,7 @@ function Tesserae:cycle(interactive, stroke)
         end
     end
 
-    logger.info("Tesserae: cycle", stroke and "touch" or interactive and "manual" or "timer", frame.state, "ms:", table.concat(steps, ", "))
+    logger.info("Tesserae: cycle", stroke and "touch" or press and "key " .. press.key or interactive and "manual" or "timer", frame.state, "ms:", table.concat(steps, ", "))
     local next_s
     if report then
         if type(report.config.sleep_interval_s) == "number" then
@@ -779,8 +780,9 @@ function Tesserae:showDashboard(bb, sw, sh, colour, refresh_rects)
     self.dashboard.onTap = function(_w, _a, ges) plugin:onDashboardTouch(ges.pos, ges.pos) return true end
     self.dashboard.onSwipe = function(_w, _a, ges) plugin:onDashboardTouch(ges.pos, ges.end_pos or ges.pos) return true end
     self.dashboard.onHold = function() plugin:showDashboardMenu() return true end
-    -- Physical keys on Kindles with keypads: any press opens the same menu.
-    self.dashboard.onKeyPress = function() plugin:showDashboardMenu() return true end
+    -- Physical keys: the page-turn keys step the dashboards, any other key
+    -- (Home, Menu, Back) opens the same menu as a long press.
+    self.dashboard.onKeyPress = function(_w, key) plugin:onDashboardKey(key) return true end
     -- KOReader's e-ink driver promotes a full refresh to the Kaleido colour
     -- waveform (GC16 to GCC16, with colour post-processing) only when the
     -- refresh is flagged as dithered image content, the way its own image
@@ -835,6 +837,24 @@ function Tesserae:onDashboardTouch(pos, end_pos)
         x0 = math.floor(pos.x), y0 = math.floor(pos.y),
         x1 = math.floor(end_pos.x), y1 = math.floor(end_pos.y),
     })
+end
+
+--- A physical key on the dashboard. A page-turn key is reported to the
+-- server as a button press, which by default shows the previous or the next
+-- dashboard of the panel's lineup; the panel's button map in Tesserae can
+-- give it any other action. It runs as an interactive refresh, like a touch.
+-- ponytail: a key pressed while a refresh is running is dropped by refresh().
+function Tesserae:onDashboardKey(key)
+    local press = Protocol.button_for_key(type(key) == "table" and key.key or nil)
+    if not press then
+        self:showDashboardMenu()
+        return
+    end
+    -- The server drops a press whose id equals the last one it saw, so a
+    -- retried request cannot step twice; the counter is kept across restarts.
+    self.settings.button_seq = (tonumber(self.settings.button_seq) or 0) + 1
+    press.event_id = self.settings.button_seq
+    self:refresh(true, nil, press)
 end
 
 function Tesserae:showDashboardMenu()

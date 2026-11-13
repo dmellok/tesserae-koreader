@@ -28,7 +28,9 @@ If KOReader's TRMNL plugin is also installed and set to auto-refresh, disable on
 3. Back in Tesserae the reader appears as a panel. Assign it a dashboard.
 4. On the reader: **Tools › Tesserae › Show dashboard**.
 
-Long-press the dashboard at any time for Refresh now, Status, and Hide dashboard.
+Long-press the dashboard at any time for Refresh now, Status, and Hide dashboard. On a reader without a touch screen, press Home, Menu or Back.
+
+On a reader with page-turn keys (a Kindle 4, a Kobo Libra or Sage) the forward key shows the next dashboard of the panel's lineup and the back key the previous one; Left and Right on a five-way pad do the same. To give a key another action, such as a fixed dashboard, edit the panel's button map on its device page in Tesserae: the buttons are `left` and `right`, and a single key can be bound by its own name (`lpgback`, `lpgfwd`, `rpgback`, `rpgfwd`). Each press is a refresh, so with Wi-Fi turned off between refreshes it takes a few seconds, and a reader that is asleep has to be woken first.
 
 Taps and swipes belong to the dashboard itself. Give its elements touch actions in Tesserae (the Interaction section of the dashboard editor) and the reader reports where the finger went; the server works out the gesture and runs the action of the region under it. The repaint of a page, rotation or widget action comes back with the touch itself; a Home Assistant action, which the server repaints a few seconds later, shows on the next refresh.
 
