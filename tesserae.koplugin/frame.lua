@@ -151,6 +151,31 @@ function Frame.to_blitbuffer(bytes, w, h, rotate)
     return bb
 end
 
+--- Copy a frame patch into a packed frame and return the patched bytes, or
+-- nil, message. ``rects`` are the server's ``{x, y, w, h, offset, len}``
+-- entries: each rectangle's rows lie one after another in ``blob`` at
+-- ``offset``, in the frame's own packing, with x and w on byte boundaries.
+function Frame.apply_patch(bytes, w, h, rects, blob)
+    local bpp = Frame.bpp_for(#bytes, w, h)
+    if not bpp then return nil, "the frame does not match its size" end
+    local stride = w * bpp / 8
+    local rows = {}
+    for y = 0, h - 1 do rows[y + 1] = bytes:sub(y * stride + 1, (y + 1) * stride) end
+    for _, r in ipairs(rects) do
+        local bx, bw = r.x * bpp / 8, r.w * bpp / 8
+        if bx % 1 ~= 0 or bw % 1 ~= 0 or r.x < 0 or r.y < 0 or r.x + r.w > w or r.y + r.h > h
+            or r.len ~= bw * r.h or r.offset < 0 or r.offset + r.len > #blob then
+            return nil, "a patch rectangle does not fit the frame"
+        end
+        for i = 0, r.h - 1 do
+            local src = r.offset + i * bw
+            local row = rows[r.y + i + 1]
+            rows[r.y + i + 1] = row:sub(1, bx) .. blob:sub(src + 1, src + bw) .. row:sub(bx + bw + 1)
+        end
+    end
+    return table.concat(rows)
+end
+
 --- Turn to apply so a buffer packed at ``native_w x native_h`` shows as a
 -- ``screen_w x screen_h`` composition. 0 when the strides already agree.
 function Frame.rotation_for(native_w, native_h, screen_w, screen_h)

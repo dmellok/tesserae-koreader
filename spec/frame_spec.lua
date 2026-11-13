@@ -106,3 +106,35 @@ t.describe("to_blitbuffer", function()
         t.eq(bb.rotation, 90)
     end)
 end)
+
+t.describe("apply_patch", function()
+    -- 8 x 2 at 4 bpp: four bytes a row, every pixel black.
+    local frame = string.rep("\0", 8)
+
+    t.it("copies each rectangle's rows into place and leaves the rest", function()
+        -- x 2..5 on both rows (two bytes a row), then pixel pair 6..7 on row 1.
+        local blob = string.char(0xff, 0xff, 0x12, 0x34) .. string.char(0xab)
+        local out = Frame.apply_patch(frame, 8, 2, {
+            { x = 2, y = 0, w = 4, h = 2, offset = 0, len = 4 },
+            { x = 6, y = 1, w = 2, h = 1, offset = 4, len = 1 },
+        }, blob)
+        local px = collect(out, 8, 2, 4)
+        t.eq(#out, #frame)
+        t.eq(px[1], 0)
+        t.eq(px[3], 255)
+        t.eq(px[6], 255)
+        t.eq(px[7], 0)
+        t.eq(px[8 + 3], 1 * 17)
+        t.eq(px[8 + 6], 4 * 17)
+        t.eq(px[8 + 7], 0xa * 17)
+        t.eq(px[8 + 8], 0xb * 17)
+    end)
+
+    t.it("refuses a rectangle off a byte boundary or outside the frame", function()
+        local one = string.char(0xff)
+        t.eq(Frame.apply_patch(frame, 8, 2, { { x = 1, y = 0, w = 2, h = 1, offset = 0, len = 1 } }, one), nil)
+        t.eq(Frame.apply_patch(frame, 8, 2, { { x = 8, y = 0, w = 2, h = 1, offset = 0, len = 1 } }, one), nil)
+        t.eq(Frame.apply_patch(frame, 8, 2, { { x = 0, y = 0, w = 2, h = 1, offset = 0, len = 2 } }, one), nil)
+        t.eq(Frame.apply_patch("\0", 8, 2, {}, ""), nil)
+    end)
+end)

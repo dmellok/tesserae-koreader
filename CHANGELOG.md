@@ -7,7 +7,8 @@
 - A touch runs as an interactive refresh, like Refresh now: the reader is not put to sleep right after it, and Wi-Fi follows the Turn Wi-Fi off between refreshes setting. A Home Assistant action, which the server repaints a few seconds after the touch, shows on the next refresh.
 - A touch is reported in the pixels of the frame as downloaded, with `touch_space=fb`, so the server maps it onto the dashboard through the rotation it packed the frame with. A dashboard turned against the panel (a landscape dashboard on a reader held in portrait) needs Tesserae 0.510.0 or later; an older server only hits the right control on an unrotated frame.
 - A touch is only reported while the frame on screen matches the screen orientation; a frame the plugin had to rotate gets a message instead.
-- Each completed refresh logs one line with the time each step finished (frame, download, paint, status) and whether a touch, a manual refresh or the timer started it, to tell server time from reader time.
+- Frame patches. A greyscale reader advertises overlay schema 2, and a small change to the page on screen (a clock, a few values) arrives as changed rectangles on the frame it holds: the plugin copies them into a copy of the frame kept on disk, which stays as downloaded because every patch is relative to it, and refreshes only those rectangles, without the full-screen flash. The heartbeat now goes before the frame request, because a patch still unfetched at that request counts as undelivered and the server sends the whole frame instead. After eight patches in a row the next one repaints the whole screen. Colour readers do not ask for patches.
+- Each completed refresh logs one line with the time each step finished (status, patch, frame, download, paint) and whether a touch, a manual refresh or the timer started it, to tell server time from reader time.
 
 ## 0.3.0 (2026-10-04)
 

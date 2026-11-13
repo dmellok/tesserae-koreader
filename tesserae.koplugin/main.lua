@@ -58,6 +58,10 @@ local RETRY_S = 300
 -- up. KOReader's own connectivity check stops after 45 s without calling us
 -- back, and a busy network manager never calls back at all.
 local WIFI_WAIT_S = 90
+-- Partial refreshes leave ghosting behind; after this many patches in a row
+-- the next one repaints the whole screen. The figure is the server's own
+-- guidance for patch clients.
+local PARTIALS_BEFORE_FULL = 8
 
 -- Candidate CA bundles: KOReader ships one under its data directory on every
 -- platform; the others are common system paths for the emulator.
@@ -490,7 +494,7 @@ function Tesserae:refresh(interactive, stroke)
     end
 end
 
---- With Wi-Fi up: frame, paint, status, schedule.
+--- With Wi-Fi up: status and patch, frame, paint, schedule.
 function Tesserae:cycle(interactive, stroke)
     -- Milliseconds into the cycle at which each step finished, logged as one
     -- line, so a slow touch splits into server time (the frame request, which
@@ -502,6 +506,26 @@ function Tesserae:cycle(interactive, stroke)
     local function step(name) steps[#steps + 1] = name .. " " .. time.to_ms(time.since(started)) end
 
     local client = self:client()
+    -- The heartbeat goes first because it carries the patch for the frame on
+    -- screen. A patch whose blob is still unfetched when the frame request
+    -- arrives counts as undelivered, and the server answers that request with
+    -- the whole new frame and a full repaint instead.
+    --
+    -- Patches come in the packing of a grey frame; a colour reader gets PNG
+    -- frames, so it does not ask for them.
+    local report = client:status({
+        battery_pct = self:batteryPct(),
+        fw_version = Protocol.VERSION,
+        patches = self.settings.gamut ~= Protocol.COLOUR_GAMUT,
+    })
+    step("status")
+    local status_at = os.time()
+    -- A touch's frame request repaints the whole page anyway: the server runs
+    -- the action, renders, and answers with the full frame in the same
+    -- request, so a pending patch painted first would only delay the touch.
+    local patched = not stroke and report and report.patches and self:applyPatch(client, report.patches)
+    if patched then step("patch") end
+
     -- The etag says "I already show this". Only true while our widget is up.
     local frame, err = client:frame(self.dashboard and self.settings.etag or nil, stroke)
     step("frame")
@@ -558,8 +582,9 @@ function Tesserae:cycle(interactive, stroke)
     elseif frame.state == "unchanged" then
         self.last_error = nil
         -- After a touch "unchanged" is the usual answer (a tap outside any
-        -- region, or an action whose repaint comes later), not news.
-        if interactive and not stroke then self:note(_("Dashboard unchanged."), 2) end
+        -- region, or an action whose repaint comes later), not news; after a
+        -- patch the dashboard did change, only not as a new frame.
+        if interactive and not stroke and not patched then self:note(_("Dashboard unchanged."), 2) end
         -- The etag is only sent while the dashboard is up, so the frame is
         -- already on screen. Should the widget have gone meanwhile, repaint
         -- from the cache, or ask for the pixels again next time.
@@ -577,15 +602,16 @@ function Tesserae:cycle(interactive, stroke)
         end
     end
 
-    local report = client:status({ battery_pct = self:batteryPct(), fw_version = Protocol.VERSION })
-    step("status")
     logger.info("Tesserae: cycle", stroke and "touch" or interactive and "manual" or "timer", frame.state, "ms:", table.concat(steps, ", "))
     local next_s
     if report then
         if type(report.config.sleep_interval_s) == "number" then
             self.settings.interval_s = math.max(MIN_INTERVAL_S, report.config.sleep_interval_s)
         end
-        next_s = Protocol.seconds_until_next(report, os.time(), MIN_INTERVAL_S)
+        -- The answer's interval counts from the heartbeat, which runs before
+        -- the frame request, its download and paint; take that time off so
+        -- the wake still lands where the server meant it to.
+        next_s = math.max(MIN_INTERVAL_S, Protocol.seconds_until_next(report, os.time(), MIN_INTERVAL_S) - (os.time() - status_at))
         self.last_ok_at = os.time()
         self.settings.last_ok_at = self.last_ok_at
     else
@@ -644,7 +670,12 @@ end
 -- the colour: MuPDF hands back an RGB blit buffer, and blitting it onto a
 -- colour framebuffer keeps the pixels while a greyscale framebuffer takes
 -- their luminance. Anything else is a packed frame.
-function Tesserae:paintFile(path, frame)
+--
+-- ``patch`` = {seq, rects, blob} paints a packed frame with that patch copied
+-- in and refreshes only the rectangles it, or the patch before it, changed
+-- (see applyPatch). Any paint without one is a whole frame and forgets the
+-- applied patch, so the next patch for it is applied again.
+function Tesserae:paintFile(path, frame, patch)
     local sw, sh = Screen:getWidth(), Screen:getHeight()
     local f = io.open(path, "rb")
     if not f then return false, _("the frame file could not be read") end
@@ -652,6 +683,7 @@ function Tesserae:paintFile(path, frame)
     f:close()
     local bb
     local colour = false
+    local refresh_rects
     if frame.format == "png" or Frame.is_png(bytes) then
         bb = RenderImage:renderImageData(bytes, #bytes, false, sw, sh)
         if not bb then return false, _("the PNG could not be decoded") end
@@ -661,15 +693,67 @@ function Tesserae:paintFile(path, frame)
         local nw, nh = frame.native_w or sw, frame.native_h or sh
         local rotate = Frame.rotation_for(nw, nh, sw, sh)
         local err
+        if patch then
+            bytes, err = Frame.apply_patch(bytes, nw, nh, patch.rects, patch.blob)
+            if not bytes then return false, err end
+        end
         bb, err = Frame.to_blitbuffer(bytes, nw, nh, rotate)
         if not bb then return false, err end
+        -- Patch rectangles are in the packed frame's pixels, which are the
+        -- screen's only while the frame is painted unrotated at screen size;
+        -- a frame of any other size is rotated or scaled onto the screen.
+        if patch and nw == sw and nh == sh and (self.partial_refreshes or 0) < PARTIALS_BEFORE_FULL then
+            refresh_rects = {}
+            for _, r in ipairs(self.patch_rects or {}) do refresh_rects[#refresh_rects + 1] = r end
+            for _, r in ipairs(patch.rects) do refresh_rects[#refresh_rects + 1] = r end
+        end
     end
+    self.partial_refreshes = refresh_rects and (self.partial_refreshes or 0) + 1 or 0
+    self.patch_seq = patch and patch.seq or nil
+    self.patch_rects = patch and patch.rects or nil
     self.last_frame_colour = colour
-    self:showDashboard(bb, sw, sh, colour)
+    self:showDashboard(bb, sw, sh, colour, refresh_rects)
     return true
 end
 
-function Tesserae:showDashboard(bb, sw, sh, colour)
+--- Bring the frame on screen up to date with a patch, when the patch is for
+-- that frame and newer than the one applied. Every patch is the difference
+-- between the frame the reader downloaded (the anchor, kept on disk as it
+-- came) and the page as last rendered, so the screen is always the anchor
+-- with the latest patch on top: rebuilding from the anchor each time also
+-- puts back an area a later render returned to its anchor pixels. Returns
+-- true when the patch is on screen.
+function Tesserae:applyPatch(client, doc)
+    local meta = self.settings.last_frame
+    local seq = tonumber(doc.seq) or 0
+    if not (self.dashboard and type(meta) == "table" and meta.format == "bin" and doc.format == "fb-rect"
+            and Protocol.digest(doc.frame_digest) == Protocol.digest(self.settings.etag)
+            and seq > (self.patch_seq or 0)) then
+        return false
+    end
+    -- Fetching the blob is what tells the server the patch was delivered; an
+    -- unfetched one is answered on the frame request with the whole frame.
+    local blob_path = DataStorage:getDataDir() .. "/tesserae-patch.bin"
+    local ok, err = client:download(doc.url, blob_path)
+    local blob
+    if ok then
+        local f = io.open(blob_path, "rb")
+        if f then
+            blob = f:read("*a")
+            f:close()
+        end
+    end
+    os.remove(blob_path)
+    if not blob then
+        logger.warn("Tesserae: patch not fetched:", err and err.message)
+        return false
+    end
+    local painted, paint_err = self:paintFile(self:framePath(meta.format), meta, { seq = seq, rects = doc.rects, blob = blob })
+    if not painted then logger.warn("Tesserae: patch not applied:", paint_err) end
+    return painted
+end
+
+function Tesserae:showDashboard(bb, sw, sh, colour, refresh_rects)
     local image = ImageWidget:new{
         image = bb,
         image_disposable = true,
@@ -702,9 +786,20 @@ function Tesserae:showDashboard(bb, sw, sh, colour)
     -- refresh is flagged as dithered image content, the way its own image
     -- viewer flags itself. A grey frame keeps the plain full refresh.
     self.dashboard.dithered = colour or nil
+    -- Neither show nor close enqueues a screen refresh without a refresh
+    -- type, so the refreshes below are the only ones this paint causes.
     UIManager:show(self.dashboard)
-    -- A full refresh clears ghosting from whatever the reader showed before.
-    UIManager:setDirty(self.dashboard, "full", nil, colour or nil)
+    if refresh_rects then
+        -- A patch changes a few rectangles; refresh just those, without a
+        -- flash. "ui", not "partial": KOReader counts every "partial" toward
+        -- its own flashing promotion, which would fight PARTIALS_BEFORE_FULL.
+        for _, r in ipairs(refresh_rects) do
+            UIManager:setDirty(self.dashboard, "ui", Geom:new{ x = r.x, y = r.y, w = r.w, h = r.h })
+        end
+    else
+        -- A full refresh clears ghosting from whatever the reader showed before.
+        UIManager:setDirty(self.dashboard, "full", nil, colour or nil)
+    end
     if previous then UIManager:close(previous) end
 end
 

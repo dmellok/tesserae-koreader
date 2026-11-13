@@ -184,7 +184,7 @@ function Protocol:register(code, identity)
 end
 
 --- The frame digest an etag carries: the etag without its quotes or weak
--- marker, the form the server's touch fields use.
+-- marker, the form the server's touch and patch fields use.
 function Protocol.digest(etag)
     return (tostring(etag or ""):gsub('^W/', ''):gsub('"', ''))
 end
@@ -252,14 +252,23 @@ function Protocol:download(url, sink_path)
     return true
 end
 
---- Heartbeat. report = {battery_pct, fw_version}
--- Returns { next_poll_s, wake_at, server_time, config } or nil, err.
+--- Heartbeat. report = {battery_pct, fw_version, patches}
+-- ``patches`` advertises frame patches (overlay schema 2): a small change to
+-- the page on screen then reaches the reader as changed rectangles on the
+-- frame it holds instead of a new frame. The server keeps the capability
+-- once seen; the device's "Update delivery" setting turns it off.
+-- Returns { next_poll_s, wake_at, server_time, config, patches } or nil, err.
+-- ``patches`` is the pending patch document, its blob ``url`` made absolute:
+-- { frame_digest, seq, format, url, rects = {{x, y, w, h, offset, len}} }.
+-- It is built for the frame the server holds as live, which may not be the
+-- one on screen; the caller checks frame_digest against its own etag.
 function Protocol:status(report)
     if not self.device_id_value or not self.token then return fail(401, "not paired") end
     local payload = {
         battery_pct = report and report.battery_pct or nil,
         fw_version = (report and report.fw_version) or Protocol.VERSION,
         client = "koreader",
+        overlay = report and report.patches and { schema = 2 } or nil,
     }
     local status, body = self:post_json(self:url("/" .. self.device_id_value .. "/status"), payload)
     local decoded = decode_json(self.json, body)
@@ -268,11 +277,18 @@ function Protocol:status(report)
         err.unpaired = (status == 401 or status == 403)
         return nil, err
     end
+    local patches = decoded.overlay_patches
+    if type(patches) ~= "table" or type(patches.url) ~= "string" or type(patches.rects) ~= "table" then
+        patches = nil
+    elseif patches.url:sub(1, 1) == "/" then
+        patches.url = self.base_url .. patches.url
+    end
     return {
         next_poll_s = tonumber(decoded.next_poll_s),
         wake_at = tonumber(decoded.wake_at),
         server_time = tonumber(decoded.server_time),
         config = type(decoded.config) == "table" and decoded.config or {},
+        patches = patches,
     }
 end
 
