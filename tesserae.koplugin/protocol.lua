@@ -11,6 +11,8 @@
 --
 --   POST <base>/api/v1/device/register              X-Pairing-Code: <claim code>
 --   GET  <base>/api/v1/device/<id>/frame            If-None-Match: "<render_id>"
+--        ?touch_x0=..                               a tap or swipe on the dashboard
+--        ?button=left|right&button_event_id=N       a page-turn key
 --   GET  <frame.url>                                the packed bytes
 --   POST <base>/api/v1/device/<id>/status           {battery_pct, fw_version}
 --   POST <base>/api/v1/device/<id>/log              free-form lines
@@ -21,7 +23,7 @@ local Protocol = {}
 Protocol.__index = Protocol
 
 Protocol.KIND = "koreader_client"
-Protocol.VERSION = "0.3.0"
+Protocol.VERSION = "0.4.0"
 Protocol.USER_AGENT = "tesserae-koreader/" .. Protocol.VERSION
 
 -- Gamuts the server can pack, finest first, with the width each one needs.
@@ -189,6 +191,27 @@ function Protocol.digest(etag)
     return (tostring(etag or ""):gsub('^W/', ''):gsub('"', ''))
 end
 
+-- KOReader key names that step the dashboards, and the button each one is
+-- reported as. A Kindle 4 has a back and a forward key on each side of the
+-- screen (LPgBack / LPgFwd, RPgBack / RPgFwd); Kobos with page keys report
+-- the R pair; a five-way pad reports Left and Right.
+local BUTTON_FOR_KEY = {
+    LPgBack = "left", RPgBack = "left", Left = "left",
+    LPgFwd = "right", RPgFwd = "right", Right = "right",
+}
+
+--- The button press a physical key stands for, or nil for a key that is not
+-- a dashboard button (Home, Menu, Back and the rest, which open the plugin
+-- menu). Returns {button, key}: ``button`` is the name the server's default
+-- map knows (left = previous dashboard, right = next), ``key`` the KOReader
+-- key name in lower case, sent as ``button_key`` so a button map on the
+-- device page can give one physical key its own action ("rpgfwd").
+function Protocol.button_for_key(key_name)
+    local button = BUTTON_FOR_KEY[key_name]
+    if not button then return nil end
+    return { button = button, key = string.lower(key_name) }
+end
+
 --- Ask for the current frame.
 -- Returns one of:
 --   { state = "frame", url, format, panel_w, panel_h, native_w, native_h, render_id, etag }
@@ -206,7 +229,13 @@ end
 -- action before it looks the frame up, so a page change comes back on this
 -- same answer. The etag doubles as the digest: a stroke on a frame the server
 -- has since replaced is dropped, never run against content the user did not see.
-function Protocol:frame(etag, stroke)
+--
+-- ``press`` = {button, key, event_id} reports a physical key instead (see
+-- button_for_key). The server looks the key, then the button, up in the
+-- panel's button map and runs the action before it looks the frame up, so
+-- the next or previous dashboard comes back on this same answer. A retry
+-- resends the same event_id and is dropped as a duplicate.
+function Protocol:frame(etag, stroke, press)
     if not self.device_id_value or not self.token then return fail(401, "not paired") end
     local headers = self:auth_headers()
     if etag and etag ~= "" then headers["If-None-Match"] = etag end
@@ -214,6 +243,8 @@ function Protocol:frame(etag, stroke)
     if stroke and etag and etag ~= "" then
         url = url .. string.format("?touch_x0=%d&touch_y0=%d&touch_x1=%d&touch_y1=%d&touch_space=fb&touch_digest=%s",
             stroke.x0, stroke.y0, stroke.x1, stroke.y1, Protocol.digest(etag))
+    elseif press then
+        url = url .. string.format("?button=%s&button_key=%s&button_event_id=%d", press.button, press.key, press.event_id)
     end
     -- The server may render the page while this request waits (a panel with no
     -- frame yet, or one whose dashboard just changed), so it is marked slow.

@@ -2,8 +2,9 @@
 
 ## Unreleased
 
+- Page-turn keys change the dashboard. On a reader with physical keys (a Kindle 4, a Kobo Libra or Sage) the back and forward keys, and Left and Right on a five-way pad, are reported to the server as the `left` and `right` buttons with the next frame request; by default they show the previous and the next dashboard of the panel's lineup, and the new page comes back on the same request. The key's own name goes along as `button_key` (`lpgback`, `lpgfwd`, `rpgback`, `rpgfwd`, `left`, `right`), so the panel's button map in Tesserae can give one key its own action, such as a fixed dashboard. Every other key (Home, Menu, Back) still opens the plugin menu. Needs no server update: both a self-hosted server and Tesserae Cloud already take button presses on this route.
 - Touch actions on the dashboard. A tap or a swipe is reported to the server with the next frame request, which runs the action of the touch region under it: change page, step a rotation, fire a webhook, or call a Home Assistant service. A page change comes back on the same request.
-- The plugin menu (Refresh now, Status, Hide dashboard) moved from a tap to a long press. Physical keys still open it.
+- The plugin menu (Refresh now, Status, Hide dashboard) moved from a tap to a long press. Physical keys other than the page-turn keys still open it.
 - A touch runs as an interactive refresh, like Refresh now: the reader is not put to sleep right after it, and Wi-Fi follows the Turn Wi-Fi off between refreshes setting. A Home Assistant action, which the server repaints a few seconds after the touch, shows on the next refresh.
 - A touch is reported in the pixels of the frame as downloaded, with `touch_space=fb`, so the server maps it onto the dashboard through the rotation it packed the frame with. A dashboard turned against the panel (a landscape dashboard on a reader held in portrait) needs Tesserae 0.510.0 or later; an older server only hits the right control on an unrotated frame.
 - A touch is only reported while the frame on screen matches the screen orientation; a frame the plugin had to rotate gets a message instead.
