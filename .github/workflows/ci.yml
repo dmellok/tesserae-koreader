@@ -18,9 +18,10 @@ jobs:
       - name: Tests
         run: luajit spec/run.lua
       - name: Package
+        # A pull request's ref name is "<number>/merge"; the slash is not a file name.
         run: |
           mkdir -p dist
-          zip -r "dist/tesserae.koplugin-${GITHUB_REF_NAME}.zip" tesserae.koplugin -x '*.DS_Store'
+          zip -r "dist/tesserae.koplugin-${GITHUB_REF_NAME//\//-}.zip" tesserae.koplugin -x '*.DS_Store'
       - uses: actions/upload-artifact@v4
         with:
           name: tesserae.koplugin
