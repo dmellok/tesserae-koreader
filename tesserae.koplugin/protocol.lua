@@ -183,19 +183,41 @@ function Protocol:register(code, identity)
     }
 end
 
+--- The frame digest an etag carries: the etag without its quotes or weak
+-- marker, the form the server's touch fields use.
+function Protocol.digest(etag)
+    return (tostring(etag or ""):gsub('^W/', ''):gsub('"', ''))
+end
+
 --- Ask for the current frame.
 -- Returns one of:
 --   { state = "frame", url, format, panel_w, panel_h, native_w, native_h, render_id, etag }
 --   { state = "unchanged", etag }        the etag we sent still matches
 --   { state = "empty", reason }          the server has nothing rendered yet
 -- or nil, err. err.unpaired is true when the token is no longer accepted.
-function Protocol:frame(etag)
+--
+-- ``stroke`` = {x0, y0, x1, y1} reports a touch on the frame ``etag`` names,
+-- in the pixels of that frame as downloaded (native_w x native_h).
+-- ``touch_space=fb`` has the server turn them onto the dashboard canvas
+-- through the same rotation, flip, scale and underscan it packed the frame
+-- with (Tesserae 0.510.0 and later; an older server reads them as canvas
+-- pixels, which is the same thing on an unrotated panel). The server
+-- classifies tap or swipe, hit-tests the frame's touch regions and runs the
+-- action before it looks the frame up, so a page change comes back on this
+-- same answer. The etag doubles as the digest: a stroke on a frame the server
+-- has since replaced is dropped, never run against content the user did not see.
+function Protocol:frame(etag, stroke)
     if not self.device_id_value or not self.token then return fail(401, "not paired") end
     local headers = self:auth_headers()
     if etag and etag ~= "" then headers["If-None-Match"] = etag end
+    local url = self:url("/" .. self.device_id_value .. "/frame")
+    if stroke and etag and etag ~= "" then
+        url = url .. string.format("?touch_x0=%d&touch_y0=%d&touch_x1=%d&touch_y1=%d&touch_space=fb&touch_digest=%s",
+            stroke.x0, stroke.y0, stroke.x1, stroke.y1, Protocol.digest(etag))
+    end
     -- The server may render the page while this request waits (a panel with no
     -- frame yet, or one whose dashboard just changed), so it is marked slow.
-    local status, body, resp_headers = self.http({ url = self:url("/" .. self.device_id_value .. "/frame"), method = "GET", headers = headers, slow = true })
+    local status, body, resp_headers = self.http({ url = url, method = "GET", headers = headers, slow = true })
     resp_headers = resp_headers or {}
     if status == 304 then
         return { state = "unchanged", etag = resp_headers.etag or etag }

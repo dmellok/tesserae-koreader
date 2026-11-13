@@ -32,6 +32,7 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
+local time = require("ui/time")
 local util = require("util")
 local _ = require("gettext")
 local T = require("ffi/util").template
@@ -434,7 +435,8 @@ function Tesserae:note(msg, timeout)
 end
 
 --- One refresh: bring Wi-Fi up, run the cycle, then schedule the next.
-function Tesserae:refresh(interactive)
+-- ``stroke`` is a touch on the dashboard to report with the frame request.
+function Tesserae:refresh(interactive, stroke)
     if self.in_cycle then
         logger.info("Tesserae: refresh already in progress")
         return
@@ -455,7 +457,7 @@ function Tesserae:refresh(interactive)
             if not self.in_cycle then self:refresh(interactive) end
             return
         end
-        local ok, err = pcall(function() self:cycle(interactive) end)
+        local ok, err = pcall(function() self:cycle(interactive, stroke) end)
         if not ok then
             logger.err("Tesserae: cycle failed:", err)
             self.last_error = tostring(err)
@@ -489,10 +491,20 @@ function Tesserae:refresh(interactive)
 end
 
 --- With Wi-Fi up: frame, paint, status, schedule.
-function Tesserae:cycle(interactive)
+function Tesserae:cycle(interactive, stroke)
+    -- Milliseconds into the cycle at which each step finished, logged as one
+    -- line, so a slow touch splits into server time (the frame request, which
+    -- carries the touch's dispatch and render) and reader time. "paint" ends
+    -- when the widget is built; the e-ink refresh itself runs after the cycle
+    -- returns to KOReader's UI loop.
+    local started = time.now()
+    local steps = {}
+    local function step(name) steps[#steps + 1] = name .. " " .. time.to_ms(time.since(started)) end
+
     local client = self:client()
     -- The etag says "I already show this". Only true while our widget is up.
-    local frame, err = client:frame(self.dashboard and self.settings.etag or nil)
+    local frame, err = client:frame(self.dashboard and self.settings.etag or nil, stroke)
+    step("frame")
     if not frame then
         self.last_error = err.message
         if err.unpaired then
@@ -516,6 +528,7 @@ function Tesserae:cycle(interactive)
         -- download succeeded, so a failure leaves the last good frame intact.
         local part = path .. ".part"
         local ok_dl, dl_err = client:download(frame.url, part)
+        step("download")
         if ok_dl then
             os.remove(path)
             if not os.rename(part, path) then ok_dl, dl_err = nil, { message = _("the frame file could not be saved") } end
@@ -529,6 +542,7 @@ function Tesserae:cycle(interactive)
             return
         end
         local painted, paint_err = self:paintFile(path, frame)
+        step("paint")
         if painted then
             self.settings.etag = frame.etag
             self.settings.last_frame = {
@@ -543,7 +557,9 @@ function Tesserae:cycle(interactive)
         end
     elseif frame.state == "unchanged" then
         self.last_error = nil
-        if interactive then self:note(_("Dashboard unchanged."), 2) end
+        -- After a touch "unchanged" is the usual answer (a tap outside any
+        -- region, or an action whose repaint comes later), not news.
+        if interactive and not stroke then self:note(_("Dashboard unchanged."), 2) end
         -- The etag is only sent while the dashboard is up, so the frame is
         -- already on screen. Should the widget have gone meanwhile, repaint
         -- from the cache, or ask for the pixels again next time.
@@ -562,6 +578,8 @@ function Tesserae:cycle(interactive)
     end
 
     local report = client:status({ battery_pct = self:batteryPct(), fw_version = Protocol.VERSION })
+    step("status")
+    logger.info("Tesserae: cycle", stroke and "touch" or interactive and "manual" or "timer", frame.state, "ms:", table.concat(steps, ", "))
     local next_s
     if report then
         if type(report.config.sleep_interval_s) == "number" then
@@ -665,12 +683,20 @@ function Tesserae:showDashboard(bb, sw, sh, colour)
         dimen = Geom:new{ x = 0, y = 0, w = sw, h = sh },
         image,
     }
+    local range = Geom:new{ x = 0, y = 0, w = sw, h = sh }
     self.dashboard.ges_events = {
-        Tap = { GestureRange:new{ ges = "tap", range = Geom:new{ x = 0, y = 0, w = sw, h = sh } } },
+        Tap = { GestureRange:new{ ges = "tap", range = range } },
+        Swipe = { GestureRange:new{ ges = "swipe", range = range } },
+        Hold = { GestureRange:new{ ges = "hold", range = range } },
     }
-    self.dashboard.onTap = function() plugin:onDashboardTap() return true end
+    -- Taps and swipes belong to the dashboard's own touch regions; the
+    -- plugin's menu moved to a long press. KOReader hands a swipe over with
+    -- its contact point in pos and its lift point in end_pos.
+    self.dashboard.onTap = function(_w, _a, ges) plugin:onDashboardTouch(ges.pos, ges.pos) return true end
+    self.dashboard.onSwipe = function(_w, _a, ges) plugin:onDashboardTouch(ges.pos, ges.end_pos or ges.pos) return true end
+    self.dashboard.onHold = function() plugin:showDashboardMenu() return true end
     -- Physical keys on Kindles with keypads: any press opens the same menu.
-    self.dashboard.onKeyPress = function() plugin:onDashboardTap() return true end
+    self.dashboard.onKeyPress = function() plugin:showDashboardMenu() return true end
     -- KOReader's e-ink driver promotes a full refresh to the Kaleido colour
     -- waveform (GC16 to GCC16, with colour post-processing) only when the
     -- refresh is flagged as dithered image content, the way its own image
@@ -690,7 +716,33 @@ function Tesserae:closeDashboard()
     end
 end
 
-function Tesserae:onDashboardTap()
+--- Report a touch to the server, which runs the action of the region under it.
+-- The protocol takes the stroke in the served frame's pixel space, the packed
+-- buffer as downloaded; mapping it into the dashboard's layout is the
+-- server's job, since the server chose the rotation. KOReader gives gesture
+-- positions in the screen's current orientation, which is that pixel space
+-- only while the buffer was painted unrotated, at screen size.
+function Tesserae:onDashboardTouch(pos, end_pos)
+    local meta = self.settings.last_frame
+    if not (type(meta) == "table" and meta.native_w == Screen:getWidth() and meta.native_h == Screen:getHeight()) then
+        -- ponytail: a frame packed transposed (Frame.rotation_for = 90) gets no
+        -- touch; map the stroke back through that rotation if such a panel needs it.
+        self:note(_("Tesserae: touch works only while the frame matches the screen orientation."), 4)
+        return
+    end
+    -- A touch runs as an interactive refresh, like Refresh now: the reader is
+    -- not put to sleep right after it, and the repaint of a page, rotation or
+    -- widget action comes back on the touch's own request. A Home Assistant
+    -- action, which the server repaints a few seconds later, shows on the next
+    -- refresh. ponytail: a touch while a refresh is running is dropped by
+    -- refresh(); queue it if taps go missing in practice.
+    self:refresh(true, {
+        x0 = math.floor(pos.x), y0 = math.floor(pos.y),
+        x1 = math.floor(end_pos.x), y1 = math.floor(end_pos.y),
+    })
+end
+
+function Tesserae:showDashboardMenu()
     local dialog
     dialog = ButtonDialog:new{
         buttons = {

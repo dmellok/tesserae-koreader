@@ -28,7 +28,9 @@ If KOReader's TRMNL plugin is also installed and set to auto-refresh, disable on
 3. Back in Tesserae the reader appears as a panel. Assign it a dashboard.
 4. On the reader: **Tools › Tesserae › Show dashboard**.
 
-Tap the dashboard at any time for Refresh now, Status, and Hide dashboard.
+Long-press the dashboard at any time for Refresh now, Status, and Hide dashboard.
+
+Taps and swipes belong to the dashboard itself. Give its elements touch actions in Tesserae (the Interaction section of the dashboard editor) and the reader reports where the finger went; the server works out the gesture and runs the action of the region under it. The repaint of a page, rotation or widget action comes back with the touch itself; a Home Assistant action, which the server repaints a few seconds later, shows on the next refresh.
 
 ## Settings
 
@@ -67,7 +69,7 @@ The wire format for greyscale is the one Tesserae's ESP32 firmware paints: row m
 
 ```sh
 brew install luajit        # or apt-get install luajit
-luajit spec/run.lua        # 33 tests, no KOReader needed
+luajit spec/run.lua        # 35 tests, no KOReader needed
 ```
 
 `protocol.lua`, `frame.lua` and `wake.lua` are dependency free and tested under plain LuaJIT with KOReader's blit buffer stubbed. `main.lua` is the KOReader glue. The KOReader emulator on a desktop is the quickest way to try the whole plugin; the sibling-module loader uses `dofile` on the plugin's own folder, so the folder can be symlinked into the emulator's `plugins/`.
