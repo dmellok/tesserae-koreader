@@ -79,3 +79,70 @@ t.describe("sleep_now", function()
         t.eq(ui.allow, 1)
     end)
 end)
+
+local function fake_kindle()
+    local props = {}
+    local handle = { set_int_property = function(_, _, name, v) props[#props + 1] = name .. "=" .. v end }
+    return { isKindle = function() return true end, powerd = { lipc_handle = handle } }, props
+end
+
+t.describe("hold_awake", function()
+    t.it("pauses auto suspend and puts it back as it was", function()
+        local share = {}
+        local w = Wake.new({ Device = { isKindle = function() return false end }, UIManager = fake_uimanager(), PluginShare = share })
+        w:hold_awake()
+        t.eq(share.pause_auto_suspend, true)
+        t.eq(share.keepalive, nil)
+        w:release_awake()
+        t.eq(share.pause_auto_suspend, nil)
+    end)
+
+    t.it("keeps a Kindle's screen saver off for as long as the dashboard is up", function()
+        local kindle, props = fake_kindle()
+        local share = {}
+        local w = Wake.new({ Device = kindle, UIManager = fake_uimanager(), PluginShare = share })
+        w:hold_awake()
+        t.eq(share.keepalive, true)
+        t.eq(props[#props], "preventScreenSaver=1")
+        -- the end of a refresh must not let the power daemon suspend
+        w:kindle_hold(true)
+        w:kindle_hold(false)
+        t.eq(props[#props], "preventScreenSaver=1")
+        w:release_awake()
+        t.eq(props[#props], "preventScreenSaver=0")
+        t.eq(share.keepalive, nil)
+    end)
+
+    t.it("leaves KOReader's Keep alive on when it was on before", function()
+        local kindle, props = fake_kindle()
+        local share = { keepalive = true }
+        local w = Wake.new({ Device = kindle, UIManager = fake_uimanager(), PluginShare = share })
+        -- sleeping between refreshes: a cycle's own hold does not clear Keep alive
+        w:kindle_hold(true)
+        w:kindle_hold(false)
+        t.eq(props[#props], "preventScreenSaver=1")
+        w:hold_awake()
+        w:release_awake()
+        t.eq(share.keepalive, true)
+        t.eq(props[#props], "preventScreenSaver=1")
+    end)
+
+    t.it("uses the shell when the power daemon's handle is not open", function()
+        local ran = {}
+        local kindle = { isKindle = function() return true end, powerd = {} }
+        local w = Wake.new({ Device = kindle, UIManager = fake_uimanager(), execute = function(c) ran[#ran + 1] = c end })
+        w:hold_awake()
+        t.eq(ran[1], "lipc-set-prop com.lab126.powerd preventScreenSaver 1")
+    end)
+end)
+
+t.describe("rtc_missing_reason", function()
+    t.it("says nothing when there is a hardware wake, and why when there is not", function()
+        local ui = fake_uimanager()
+        local kobo = { wakeup_mgr = fake_wakeup_mgr(), canSuspend = function() return true end }
+        t.eq(Wake.new({ Device = kobo, UIManager = ui }):rtc_missing_reason(), nil)
+        local kindle = { isKindle = function() return true end, supportsScreensaver = function() return true end, powerd = {} }
+        local why = Wake.new({ Device = kindle, UIManager = ui }):rtc_missing_reason()
+        t.eq(why:find("lipc handle missing", 1, true) ~= nil, true)
+    end)
+end)

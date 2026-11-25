@@ -27,6 +27,7 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local LuaSettings = require("luasettings")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
+local PluginShare = require("pluginshare")
 local RenderImage = require("ui/renderimage")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
@@ -115,7 +116,7 @@ end
 
 function Tesserae:init()
     self:loadSettings()
-    self.wake = Wake.new({ Device = Device, UIManager = UIManager, logger = logger })
+    self.wake = Wake.new({ Device = Device, UIManager = UIManager, logger = logger, PluginShare = PluginShare })
     self.in_cycle = false
     self.last_error = nil
     self.last_ok_at = self.settings.last_ok_at
@@ -380,7 +381,14 @@ function Tesserae:start(interactive)
     self.settings.enabled = true
     self:saveSettings()
     self:holdSleepScreen()
-    if self.wake:mode(self.settings.sleep_between) == "awake" then self.wake:hold_awake() end
+    if self.wake:mode(self.settings.sleep_between) == "awake" then
+        self.wake:hold_awake()
+    else
+        -- The setting may just have been switched on: let go of an awake hold.
+        self.wake:release_awake()
+    end
+    local no_rtc = self.wake:rtc_missing_reason()
+    if no_rtc then logger.info("Tesserae: no hardware wake, staying awake between refreshes:", no_rtc) end
     -- Put the last frame back straight away, before Wi-Fi: after a KOReader
     -- restart or a Hide/Show the server answers "unchanged" and would
     -- otherwise leave the screen empty until the dashboard next changes.
@@ -438,6 +446,23 @@ function Tesserae:note(msg, timeout)
     UIManager:show(InfoMessage:new{ text = msg, timeout = timeout or 4 })
 end
 
+--- One log line with the power and Wi-Fi state, to tell apart a refresh that
+-- ran with the reader awake from one that ran in its screen-saver state after
+-- a hardware alarm, where Wi-Fi may not come back.
+function Tesserae:logRadioState(when)
+    local function ask(obj, method)
+        if not (obj and obj[method]) then return "?" end
+        local ok, v = pcall(obj[method], obj)
+        if not ok then return "?" end
+        return tostring(v)
+    end
+    logger.info("Tesserae:", when .. ":",
+        "power state", ask(Device.powerd, "getPowerdState"),
+        "Wi-Fi on", ask(NetworkMgr, "isWifiOn"),
+        "connected", ask(NetworkMgr, "isConnected"),
+        "wake mode", self.wake:mode(self.settings.sleep_between))
+end
+
 --- One refresh: bring Wi-Fi up, run the cycle, then schedule the next.
 -- ``stroke`` is a touch on the dashboard to report with the frame request,
 -- ``press`` a page-turn key; a refresh carries at most one of them.
@@ -477,11 +502,13 @@ function Tesserae:refresh(interactive, stroke, press)
     watchdog = function()
         if gen ~= self.cycle_gen or not self.in_cycle then return end
         logger.warn("Tesserae: Wi-Fi did not come up within", WIFI_WAIT_S, "s")
+        self:logRadioState("at the Wi-Fi timeout")
         self.last_error = _("Wi-Fi did not connect")
         if interactive then self:note(T(_("Tesserae: %1"), self.last_error), 6) end
         self:finishCycle(RETRY_S, interactive)
     end
     UIManager:scheduleIn(WIFI_WAIT_S, watchdog)
+    if not interactive then self:logRadioState("at the start of a timed refresh") end
     -- turnOnWifiAndWaitForConnection returns false when it could not even
     -- start; then the callback never comes and we must reschedule ourselves.
     local status = NetworkMgr:turnOnWifiAndWaitForConnection(function()
@@ -629,6 +656,8 @@ function Tesserae:finishCycle(next_s, interactive)
     self.wake:kindle_hold(false)
     if not self.settings.enabled then return end
     local mode = self.wake:mode(self.settings.sleep_between)
+    -- Awake mode: put the holds back in case something cleared them since.
+    if mode == "awake" then self.wake:hold_awake() end
     self.next_due_at = os.time() + next_s
     self.wake:schedule(next_s, self.refresh_task, mode)
     if self.settings.wifi_off_between and Device:hasWifiToggle() then
